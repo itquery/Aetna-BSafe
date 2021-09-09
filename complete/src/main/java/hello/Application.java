@@ -11,7 +11,7 @@ public class Application {
 
 	@RequestMapping("/")
 	public String home() {
-		return "Welcome to B-Safe an Atena Project";
+		return "Welcome to B-Safe an Aetna Project";
 	}
 
 	public static void main(String[] args) {
