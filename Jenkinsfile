@@ -1,44 +1,107 @@
-pipeline {
-	agent none
-
-	triggers {
-		pollSCM 'H/10 * * * *'
+pipeline { 
+	agent {
+		label {
+		label "Jenkins-Slave"
+		}
+	}
+    environment { 
+        registry = "itquery/aetna-bsafe-docker" 
+        registryCredential = 'dockerhub_cred' 
+        dockerImage = 'docker.build registry + ":$BUILD_NUMBER"' 
 	}
 
-	options {
-		disableConcurrentBuilds()
-		buildDiscarder(logRotator(numToKeepStr: '14'))
+    stages { 
+        stage('Code Checkout') { 
+	    steps { 
+		git branch: 'main',
+		url: 'https://github.com/itquery/Aetna-BSafe.git'
+		}
+        } 
+
+	stage('Clean & Package') {
+	steps {
+	    dir('complete') {
+	    sh "./mvnw clean package"
+		    }
+		}
 	}
 
-	stages {
-		stage("test: baseline (jdk8)") {
-			agent {
-				docker {
-					image 'adoptopenjdk/openjdk8:latest'
-					args '-v $HOME/.m2:/tmp/jenkins-home/.m2'
-				}
+	stage('Test Result') {
+	steps {
+	    dir('complete') {
+	    junit '**/target/surefire-reports/TEST-*.xml'
+	    archiveArtifacts artifacts: 'target*//*.jar', followSymlinks: false, onlyIfSuccessful: true
+		    }
+		}
+	}
+
+        stage('Build Docker Image') { 
+	    steps { 
+	        dir('complete') {
+                script { 
+                    dockerImage = docker.build registry + ":$BUILD_NUMBER" 
+                }
+	        }
+            } 
+        }
+        stage('Push Docker Image') { 
+            steps { 
+                script { 
+		 docker.withRegistry('https://registry.hub.docker.com', 'dockerhub_cred') {
+		 dockerImage.push()   
 			}
-			options { timeout(time: 30, unit: 'MINUTES') }
-			steps {
-				sh 'test/run.sh'
-			}
+		} 
+           }
+        } 
+
+	stage("Run Docker Container") {
+		steps {
+		// Stop running container to avoid conflict
+                script{
+                    def doc_containers = sh(returnStdout: true, script: 'docker container ps -aq ').replaceAll("\n", " ") 
+                    if (doc_containers) {
+                        sh "docker stop ${doc_containers}"
+                    }
+                }
+
+			sh "docker run -i --name BSafe_$BUILD_NUMBER -d -p 3000:8080 $registry:$BUILD_NUMBER --bind 0.0.0.0"
+			sh "docker ps -f name=BSafe_$BUILD_NUMBER"
+	          }
 		}
 
-	}
+	stage("Capture HTTP response") {
+            steps {
+                  script {
+		  // Give some time to tomcat application inside the container to start
+			sh "sleep 5"
+			sh "curl -X GET -s GET http://localhost:3000/"
+                }
+            }
+        }
+        
+	stage('Cleaning up') { 
+		steps { 
+		sh "docker stop BSafe_$BUILD_NUMBER"  
+		sh "docker rm   BSafe_$BUILD_NUMBER"    
+		sh "docker rmi $registry:$BUILD_NUMBER" 
 
+			}
+		}
+    }
+        
 	post {
-		changed {
+		always {
 			script {
-				slackSend(
-						color: (currentBuild.currentResult == 'SUCCESS') ? 'good' : 'danger',
-						channel: '#sagan-content',
-						message: "${currentBuild.fullDisplayName} - `${currentBuild.currentResult}`\n${env.BUILD_URL}")
-				emailext(
-						subject: "[${currentBuild.fullDisplayName}] ${currentBuild.currentResult}",
-						mimeType: 'text/html',
-						recipientProviders: [[$class: 'CulpritsRecipientProvider'], [$class: 'RequesterRecipientProvider']],
-						body: "<a href=\"${env.BUILD_URL}\">${currentBuild.fullDisplayName} is reported as ${currentBuild.currentResult}</a>")
+			    def mailRecipients = 'rajesh.maurya@gmail.com'
+			    def jobName = currentBuild.fullDisplayName
+			    emailext body: '''${SCRIPT, template="groovy-html.template"}''',
+			    mimeType: 'text/html',
+			    subject: "[Jenkins] ${jobName}",
+			    to: "${mailRecipients}",
+			    replyTo: "${mailRecipients}",
+			    recipientProviders: [[$class: 'CulpritsRecipientProvider']]
 			}
 		}
 	}
+
 }
